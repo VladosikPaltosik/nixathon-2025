@@ -1,19 +1,18 @@
 """
-Kingdom Wars AI Strategy - Version 2 (Defensive Rebalance)
+Kingdom Wars AI Strategy - Version 3 (Economic Focus)
 
 Core philosophy:
-1. Rush upgrades early (extended to turn 23) — resource advantage compounds hard.
-2. Defense first — survival enables late-game dominance.
-3. HP-adaptive strategy — scale aggression/defense based on current HP.
-4. Smart retaliation — revenge when strong, defend when weak.
-5. Focus fire — eliminating a player is worth more than spreading damage.
-6. Diplomacy — gang up on the strongest threat.
+1. ECONOMY FIRST — No attacks until Level 3, focus purely on upgrades
+2. SURVIVAL TARGET — Maintain HP + Armor >= 120 during early game
+3. DEFENSIVE LATE GAME — After Level 3, prioritize defense over offense
+4. HP-adaptive strategy — scale aggression/defense based on current HP
+5. Focus fire — eliminating a player is worth more than spreading damage
+6. Diplomacy — gang up on the strongest threat
 
-Key improvements over v1:
-- 100% armor coverage (was 60%)
-- HP-aware defense scaling (higher armor when HP < 60)
-- Reduced suicidal retaliation (bonus 50 vs 100)
-- Better early armor (12 vs 5)
+Key improvements over v2:
+- Zero attacks before Level 3 (was: saving mode with exceptions)
+- HP + Armor >= 120 guarantee during early game
+- Increased defensive spending after Level 3 (50-70% armor budget)
 - Extended upgrade window (turn 23 vs 20)
 """
 
@@ -146,26 +145,18 @@ def decide_combat(req: CombatRequest) -> list[dict]:
     allies = _get_allies(req.diplomacy, me.playerId)
     agreed_targets = _get_agreed_targets(req.diplomacy, me.playerId)
 
-    # --- Check if we're in "saving mode" for early upgrades ---
-    saving_for_upgrade = False
-    next_upgrade_cost = 0
-
-    if me.level < 3 and me.level < MAX_LEVEL and me.hp > 50:
-        # Only save if HP is healthy enough (>50)
-        # If HP is critical, survival takes priority over economy
-        next_upgrade_cost = upgrade_cost(me.level)
-        # If we have 70%+ of upgrade cost, enter saving mode
-        if budget >= next_upgrade_cost * 0.7:
-            saving_for_upgrade = True
+    # --- Check if we're in "economy mode" (Level < 3) ---
+    # Strategy: No attacks until Level 3, focus purely on economy and survival
+    economy_mode = me.level < 3
 
     # --- 1. UPGRADE decision ---
     budget = _maybe_upgrade(actions, me, turn, budget)
 
     # --- 2. ARMOR decision ---
-    budget = _maybe_armor(actions, me, turn, budget, attackers, enemies, saving_for_upgrade)
+    budget = _maybe_armor(actions, me, turn, budget, attackers, enemies, economy_mode)
 
     # --- 3. ATTACK decision ---
-    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me, saving_for_upgrade)
+    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me, economy_mode)
 
     return actions
 
@@ -207,7 +198,7 @@ def _maybe_armor(
     budget: int,
     attackers: dict[int, int],
     enemies: list[EnemyTower],
-    saving_for_upgrade: bool = False,
+    economy_mode: bool = False,
 ) -> int:
     if budget <= 0:
         return budget
@@ -221,32 +212,38 @@ def _maybe_armor(
     # HP-based defense multiplier: lower HP = more defensive
     hp_ratio = me.hp / 100.0
 
-    # SAVING MODE: Minimize spending when accumulating for early upgrades (level < 3)
-    if saving_for_upgrade:
-        # Only buy minimal armor - just enough to not die
+    # ECONOMY MODE (Level < 3): Guarantee HP + Armor >= 120
+    if economy_mode:
+        # Target: maintain total effective HP of 120
+        TARGET_TOTAL_HP = 120
+        current_total_hp = me.hp + me.armor
+        needed_armor = max(0, TARGET_TOTAL_HP - current_total_hp)
+
         if incoming_damage > 0:
-            # Cover 50% of incoming to survive
-            armor_amount = min(int(incoming_damage * 0.5), budget // 4)
+            # Take the maximum of: needed for 120 HP or 100% incoming damage
+            armor_amount = max(needed_armor, incoming_damage)
         else:
-            # Minimal armor (5-10 coins max)
-            armor_amount = min(8, budget // 5)
+            # Just get to 120 total HP
+            armor_amount = needed_armor
+
+        # Cap at 70% of budget to leave room for upgrades
+        armor_amount = min(armor_amount, int(budget * 0.7))
+
+    # LEVEL 3+ MODE: More defensive focus
     elif incoming_damage > 0:
-        # Cover 100% of expected incoming (was 60%)
-        # Cap increases with lower HP: from budget//2 to budget*0.7
-        cap_multiplier = 0.5 + (1.0 - hp_ratio) * 0.2  # 0.5 to 0.7
+        # Cover 100% of expected incoming
+        # Increased cap multiplier: from budget*0.6 to budget*0.8
+        cap_multiplier = 0.6 + (1.0 - hp_ratio) * 0.2  # 0.6 to 0.8
         armor_amount = min(int(incoming_damage * 1.0), int(budget * cap_multiplier))
-    elif turn <= 3:
-        # Better early armor — increased from 5 to 12
-        armor_amount = min(12, budget // 3)
     elif me.hp < 40:
-        # Critical HP — go very defensive (60% of budget)
-        armor_amount = min(int(avg_enemy_resources * 0.8), int(budget * 0.6))
+        # Critical HP — go very defensive (70% of budget, was 60%)
+        armor_amount = min(int(avg_enemy_resources * 1.0), int(budget * 0.7))
     elif me.hp < 60:
-        # Low HP — invest significantly more (50% of budget)
-        armor_amount = min(int(avg_enemy_resources * 0.7), int(budget * 0.5))
+        # Low HP — invest significantly more (60% of budget, was 50%)
+        armor_amount = min(int(avg_enemy_resources * 0.8), int(budget * 0.6))
     else:
-        # Normal HP — moderate defense (35% of budget, was 20%)
-        armor_amount = min(int(avg_enemy_resources * 0.4), int(budget * 0.35), 25)
+        # Normal HP — higher defense than before (50% of budget, was 35%)
+        armor_amount = min(int(avg_enemy_resources * 0.5), int(budget * 0.5))
 
     armor_amount = max(0, armor_amount)
 
@@ -265,24 +262,20 @@ def _decide_attacks(
     allies: set[int],
     agreed_targets: set[int],
     me: PlayerTower,
-    saving_for_upgrade: bool = False,
+    economy_mode: bool = False,
 ) -> int:
     if budget <= 0 or not enemies:
         return budget
 
-    # SAVING MODE: Don't attack at all when accumulating for early upgrades (level < 3)
-    # Exception: if being heavily attacked, minimal retaliation to deter
-    if saving_for_upgrade:
-        incoming_damage = sum(attackers.values())
-        # Only attack if being heavily attacked (incoming > 20)
-        if incoming_damage < 20:
-            return budget
-        # Otherwise allow minimal retaliation with max 20% of budget
-        budget = min(budget, int(budget * 0.2))
+    # ECONOMY MODE (Level < 3): NO ATTACKS - focus purely on upgrades
+    # Zero attacks to maximize upgrade speed and reach Level 3 ASAP
+    if economy_mode:
+        return budget
 
     # HP-based aggression: lower HP = less aggressive
+    # Reduced aggression for more defensive playstyle after Level 3
     hp_ratio = me.hp / 100.0
-    aggression_factor = 0.4 + hp_ratio * 0.6  # 0.4 to 1.0
+    aggression_factor = 0.3 + hp_ratio * 0.5  # 0.3 to 0.8 (was 0.4 to 1.0)
 
     # Score each enemy for targeting
     target_scores: list[tuple[EnemyTower, float]] = []
@@ -294,9 +287,9 @@ def _decide_attacks(
 
         score = 0.0
 
-        # Retaliation — reduced from 100 to 50, scaled by HP
+        # Retaliation — reduced from 50 to 30, scaled by HP for defensive playstyle
         if e.playerId in attackers:
-            retaliation_bonus = (50 + attackers[e.playerId] * 1.2) * aggression_factor
+            retaliation_bonus = (30 + attackers[e.playerId] * 1.0) * aggression_factor
             score += retaliation_bonus
 
         # Coordinated attack bonus
@@ -323,11 +316,11 @@ def _decide_attacks(
     target_scores.sort(key=lambda x: x[1], reverse=True)
 
     # Focus fire: dump most resources on primary target
-    # But scale aggression with HP
+    # But scale aggression with HP (reduced for defensive playstyle)
     used_targets: set[int] = set()
 
-    # Primary target budget: scale from 50% (low HP) to 75% (high HP)
-    primary_budget_ratio = 0.5 + hp_ratio * 0.25
+    # Primary target budget: scale from 40% (low HP) to 60% (high HP) - was 50% to 75%
+    primary_budget_ratio = 0.4 + hp_ratio * 0.2
 
     for target, score in target_scores:
         if budget <= 0:
