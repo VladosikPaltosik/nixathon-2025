@@ -372,6 +372,15 @@ def _maybe_upgrade(
             # Save money instead of upgrading
             return budget
 
+    # PRIORITY: Always upgrade to Level 3 if we can afford it
+    # Level 3 is critical for strategy - skip ROI check
+    if me.level < 3:
+        # Economy mode - upgrade to L3 ASAP
+        actions.append({"type": "upgrade"})
+        budget -= cost
+        return budget
+
+    # For Level 3+ upgrades, check ROI
     turns_left = max(1, GAME_HORIZON - turn)
     extra_per_turn = resource_gen(me.level + 1) - resource_gen(me.level)
     payback_turns = cost / extra_per_turn if extra_per_turn else 999
@@ -525,7 +534,7 @@ def _maybe_armor(
         # Cap at 80% to leave 20% minimum for potential attacks
         armor_amount = min(armor_amount, int(budget * 0.8))
 
-    # ECONOMY MODE (Level < 3): Guarantee HP + Armor >= 130 (increased from 120)
+    # ECONOMY MODE (Level < 3): Guarantee HP + Armor >= 130 BUT save for upgrades!
     elif economy_mode:
         # Target: maintain total effective HP of 130 minimum
         # If heavily attacked, increase target
@@ -542,6 +551,18 @@ def _maybe_armor(
         current_total_hp = me.hp + me.armor
         needed_armor = max(0, TARGET_TOTAL_HP - current_total_hp)
 
+        # CRITICAL: Reserve budget for upgrades in economy mode
+        # Check if we're close to affording next level
+        next_upgrade_cost = upgrade_cost(me.level) if me.level < MAX_LEVEL else 0
+
+        # If we're close to upgrade (within 1-2 turns), save aggressively
+        if next_upgrade_cost > 0 and budget >= next_upgrade_cost * 0.6:
+            # Close to upgrade - limit armor to 50% max
+            max_armor_ratio = 0.5
+        else:
+            # Not close - can spend more on armor
+            max_armor_ratio = 0.7
+
         # CRITICAL: If hoarders detected, prepare for burst
         if num_hoarders > 0 and incoming_damage == 0:
             # No current attack, but hoarders might strike next turn
@@ -556,11 +577,8 @@ def _maybe_armor(
             # Just get to target total HP (or preemptive hoarder defense)
             armor_amount = needed_armor
 
-        # Cap at 70-90% of budget depending on threat (leave room for upgrades)
-        cap_ratio = 0.7 + (attack_analysis["defense_boost"] * 0.6)
-        if num_hoarders >= 2:
-            cap_ratio = min(0.9, cap_ratio + 0.1)  # Up to 90% if multiple hoarders
-        armor_amount = min(armor_amount, int(budget * cap_ratio))
+        # Cap armor to leave room for upgrades (50-70% depending on proximity to upgrade)
+        armor_amount = min(armor_amount, int(budget * max_armor_ratio))
 
     # LEVEL 3+ MODE: Maintain HP + Armor >= 150, then defend/attack
     else:
