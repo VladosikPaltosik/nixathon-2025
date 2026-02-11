@@ -352,10 +352,15 @@ def _maybe_upgrade(
     if num_alive == 2:
         return budget  # Skip upgrade in 1v1
 
-    # STEALTH STRATEGY: Be second in level while 4+ players alive
+    # PRIORITY: Always upgrade to Level 3 (economy mode target)
+    # Stealth only applies to Level 3+ upgrades
+    if me.level < 3:
+        # Economy mode - always try to reach Level 3
+        pass  # Continue to ROI check below
+    # STEALTH STRATEGY: Be second in level while 4+ players alive (Level 3+ only)
     # If we're already #1 (highest level), DON'T upgrade - stay under the radar
     # Exception: if multiple players at highest level, we can upgrade
-    if num_alive >= 4:
+    elif num_alive >= 4:
         # Count how many players are at the highest level
         alive_enemies = [e for e in enemies if e.hp > 0]
         players_at_highest = sum(1 for e in alive_enemies if e.level == highest_level)
@@ -696,23 +701,24 @@ def _decide_attacks(
             remaining_budget = 0
             aggression_factor = 1.0  # Max aggression for kill
         elif save_for_kill:
-            # Saving for next turn kill - minimal attacks (only retaliation if attacked)
+            # Saving for next turn kill - light attacks for pressure
+            # Use 10-20% depending on if attacked
             if len(attackers) > 0:
-                # We were attacked - light retaliation with 20% budget
-                budget_to_use = int(budget * 0.2)
+                # We were attacked - stronger retaliation
+                budget_to_use = int(budget * 0.3)
                 remaining_budget = budget - budget_to_use
-                aggression_factor = 0.5  # Moderate
+                aggression_factor = 0.6  # Moderate
             else:
-                # Not attacked - save everything
-                budget_to_use = 0
-                remaining_budget = budget
-                aggression_factor = 0.0
+                # Not attacked - minimal pressure attacks
+                budget_to_use = int(budget * 0.15)
+                remaining_budget = budget - budget_to_use
+                aggression_factor = 0.4
         else:
-            # Normal mode - can't one-shot anyone soon, save most resources
-            # Only light attacks for pressure (20% of remaining)
-            budget_to_use = int(budget * 0.2)
+            # Normal mode - can't one-shot anyone soon
+            # Light attacks for pressure (30% of remaining)
+            budget_to_use = int(budget * 0.3)
             remaining_budget = budget - budget_to_use
-            aggression_factor = 0.4  # Low aggression
+            aggression_factor = 0.5  # Moderate aggression
 
     else:
         # Economy mode or other - shouldn't happen but handle it
@@ -722,13 +728,8 @@ def _decide_attacks(
         hp_ratio = me.hp / 100.0
         aggression_factor = 0.3 + hp_ratio * 0.5
 
-    # SAVE FOR KILL MODE: If accumulating for one-shot, minimal attacks
-    if save_for_kill and kill_target:
-        # Only attack if we can kill the target OR in retaliation
-        # Otherwise save resources
-        if kill_target.playerId not in attackers:
-            # Not being attacked - save everything for next turn kill
-            return remaining_budget
+    # Note: We always make some attacks for pressure, even when saving
+    # The budget_to_use is already set correctly above based on mode
 
     # Score each enemy for targeting
     target_scores: list[tuple[EnemyTower, float]] = []
