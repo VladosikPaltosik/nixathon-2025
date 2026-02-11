@@ -1,22 +1,28 @@
 """
-Kingdom Wars AI Strategy - Version 3.3 (Stealth Economy + Adaptive Tactics)
+Kingdom Wars AI Strategy - Version 3.7 (Patient Assassin)
 
 Core philosophy:
-1. STEALTH ECONOMY — Be #2 in level while 4+ players alive (don't be the biggest threat)
-2. ECONOMY FIRST — No attacks until Level 3, focus purely on upgrades
-3. SURVIVAL TARGET — Maintain HP + Armor >= 120 during early game (adaptive: up to 150 under heavy attack)
-4. OPPORTUNISTIC AGGRESSION — After Level 3, if not attacked: 60% offense, 20% defense, 20% save
-5. ADAPTIVE DEFENSE — Analyze attack intensity and boost armor spending accordingly when threatened
-6. HP-adaptive strategy — scale aggression/defense based on current HP
-7. Focus fire — eliminating a player is worth more than spreading damage
-8. SMART DIPLOMACY:
+1. DEFENSE PRIORITY (Level 3+, 3+ players) — 60-80% armor, save rest for one-shot kills
+2. DUEL MODE — When 2 players left: no upgrades, 50-80% defense, 100% attack with remaining
+3. ENHANCED SURVIVAL — Maintain HP + Armor >= 130 (early), >= 150 (Level 3+)
+4. PATIENT ONE-SHOT — Accumulate 40% budget until can eliminate weakest in single strike
+5. RESOURCE INTELLIGENCE — Track all enemy resources and spending patterns
+6. COUNTER-STRATEGY — Detect and counter turtle (pure defense) and hoarder (burst attack) strategies
+7. STEALTH ECONOMY — Be #2 in level while 4+ players alive (don't be the biggest threat)
+8. ECONOMY FIRST — No attacks until Level 3, focus purely on upgrades
+9. MINIMAL AGGRESSION — Only attack when can one-shot OR light retaliation (20% budget)
+10. ADAPTIVE DEFENSE — Analyze attack intensity and boost armor spending accordingly when threatened
+11. SMART DIPLOMACY:
    - Level < 3: Offer friendship to ALL players (protect economy phase)
    - Level >= 3: Coordinate attacks on WEAKEST player (quick elimination)
 
 Combat Modes:
 - ECONOMY MODE (Level < 3): 0% attack, 70-85% armor, rest upgrades
-- AGGRESSIVE MODE (Level 3+, not attacked, 3+ alive): 60% attack, 20% armor, 20% save
-- DEFENSIVE MODE (Level 3+, under attack): 20-40% attack, 50-95% armor
+- LEVEL 3+ DEFENSIVE MODE (3+ players): 60-80% armor, save 40% for one-shot kills
+  - Can one-shot: 100% remaining budget on kill target
+  - Saving for kill: 0-20% attack (retaliation only), save 80%
+  - Normal: 20% attack (pressure), save 80%
+- DUEL MODE (2 players): NO upgrades, 50-80% armor, 100% attack (remaining budget)
 
 Key improvements over v2:
 - Zero attacks before Level 3 (was: saving mode with exceptions)
@@ -41,6 +47,35 @@ New in v3.3:
 - Avoid being the biggest threat: don't upgrade if already highest level (solo)
 - Resource accumulation: save coins when not upgrading for strategic opportunities
 - Level position tracking: monitor our rank among all alive players
+
+New in v3.4:
+- Enemy resource estimation: track spending patterns and estimate current resources
+- Turtle detection: identify pure-defense players and avoid wasting attacks on them
+- Hoarder detection: identify players saving resources for burst attacks
+- Adaptive armor scaling: increase defense by +20% per detected hoarder
+- Smart targeting: deprioritize turtles (-200 score), prioritize hoarders (+40 score)
+- Max threat calculation: defend against potential burst damage from all enemies
+
+New in v3.5:
+- Increased survival thresholds: 130 HP (early), 150 HP (Level 3+) - up from 120
+- One-shot kill strategy: accumulate resources to eliminate weakest in single turn
+- Save for kill mode: minimal attacks when within 2x budget of kill threshold
+- Kill target priority: +500 score bonus for guaranteed elimination
+- Guaranteed minimum armor: always reach survival threshold before attacking
+
+New in v3.6:
+- Duel mode detection: automatically activate when 2 players remain
+- No upgrades in duel: all resources to immediate combat (won't ROI in time)
+- Duel armor strategy: 50-80% budget based on HP (balanced defense/offense)
+- Duel attack strategy: 100% of remaining budget (max aggression)
+- Aggression factor: 1.0 in duel (maximum) vs 0.3-0.8 in normal mode
+
+New in v3.7:
+- Defense priority after Level 3: 60-80% armor (was aggressive 60% attack)
+- Patient accumulation: save 40% of budget for one-shot opportunities
+- Conditional attacks: only attack when can one-shot OR light retaliation (20%)
+- Removed aggressive mode: replaced with defensive save-for-kill strategy
+- Zero waste: accumulate until guaranteed elimination, no chip damage
 """
 
 from __future__ import annotations
@@ -128,6 +163,63 @@ def _get_level_position(me: PlayerTower, enemies: list[EnemyTower]) -> tuple[int
     return (our_rank, highest_level, num_alive)
 
 
+def _estimate_enemy_resources(
+    enemy: EnemyTower,
+    previous_attacks: list[CombatActionEntry],
+    turn: int,
+) -> dict:
+    """
+    Estimate enemy's current resources based on their spending patterns.
+
+    Returns dict with:
+    - estimated_resources: likely current coins
+    - spending_last_turn: how much they spent
+    - is_hoarding: True if they're saving coins (dangerous!)
+    - is_turtle: True if they spend everything on armor
+    - threat_level: estimated max attack they can do
+    """
+    # Calculate their income per turn
+    income = resource_gen(enemy.level)
+
+    # Find their spending in previous turn
+    spending_last_turn = 0
+    for attack in previous_attacks:
+        if attack.playerId == enemy.playerId:
+            spending_last_turn += attack.action.troopCount
+
+    # If they spent very little, they likely have more saved
+    spend_ratio = spending_last_turn / max(income, 1)
+
+    if spend_ratio < 0.3:
+        # Hoarding: they spent <30% of income
+        estimated_resources = int(income * 2.5)  # Assume 2.5 turns saved
+        is_hoarding = True
+    elif spend_ratio < 0.6:
+        # Moderate spending
+        estimated_resources = int(income * 1.5)
+        is_hoarding = False
+    else:
+        # Heavy spending
+        estimated_resources = income
+        is_hoarding = False
+
+    # Check if they're "turtle" (all defense, no attacks)
+    is_turtle = (spending_last_turn == 0 and turn > 5)
+
+    # Threat level: maximum damage they could do
+    # If hoarding, they could unleash everything
+    threat_level = estimated_resources if is_hoarding else income
+
+    return {
+        "estimated_resources": estimated_resources,
+        "spending_last_turn": spending_last_turn,
+        "is_hoarding": is_hoarding,
+        "is_turtle": is_turtle,
+        "threat_level": threat_level,
+        "income": income,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Negotiation strategy
 # ---------------------------------------------------------------------------
@@ -210,23 +302,26 @@ def decide_combat(req: CombatRequest) -> list[dict]:
     # ECONOMY MODE: Level < 3 - pure economy, no attacks
     economy_mode = me.level < 3
 
-    # AGGRESSIVE MODE: Level 3+, not attacked, 3+ players alive
-    # When we're safe (not attacked), capitalize on advantage
-    # 60% attack, 20% armor, 20% save for future
-    aggressive_mode = (
+    # DUEL MODE: Only 2 players left (us + 1 enemy) - all resources to combat
+    # No upgrades, maximum defense, all-in attacks
+    duel_mode = (num_alive == 2)
+
+    # LEVEL 3+ MODE (not duel): Defense priority + save for one-shot
+    # 60%+ armor (priority), 40% save for kill
+    level3_defensive_mode = (
         me.level >= 3 and
-        len(attackers) == 0 and
-        num_alive >= 2  # At least 2 other players alive
+        not economy_mode and
+        not duel_mode
     )
 
     # --- 1. UPGRADE decision ---
     budget = _maybe_upgrade(actions, me, turn, budget, enemies)
 
     # --- 2. ARMOR decision ---
-    budget = _maybe_armor(actions, me, budget, attackers, enemies, economy_mode, aggressive_mode)
+    budget = _maybe_armor(actions, me, budget, attackers, enemies, economy_mode, level3_defensive_mode, duel_mode, turn, req.previousAttacks)
 
     # --- 3. ATTACK decision ---
-    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me, economy_mode, aggressive_mode)
+    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me, economy_mode, level3_defensive_mode, duel_mode, turn, req.previousAttacks)
 
     return actions
 
@@ -251,6 +346,11 @@ def _maybe_upgrade(
 
     # Get our level position
     our_rank, highest_level, num_alive = _get_level_position(me, enemies)
+
+    # DUEL MODE: Don't upgrade - won't have time to ROI
+    # Use all resources for immediate combat instead
+    if num_alive == 2:
+        return budget  # Skip upgrade in 1v1
 
     # STEALTH STRATEGY: Be second in level while 4+ players alive
     # If we're already #1 (highest level), DON'T upgrade - stay under the radar
@@ -337,10 +437,16 @@ def _maybe_armor(
     attackers: dict[int, int],
     enemies: list[EnemyTower],
     economy_mode: bool = False,
-    aggressive_mode: bool = False,
+    level3_defensive_mode: bool = False,
+    duel_mode: bool = False,
+    turn: int = 0,
+    previous_attacks: list[CombatActionEntry] = None,
 ) -> int:
     if budget <= 0:
         return budget
+
+    if previous_attacks is None:
+        previous_attacks = []
 
     incoming_damage = sum(attackers.values())
 
@@ -351,65 +457,150 @@ def _maybe_armor(
     alive_enemies = [e for e in enemies if e.hp > 0]
     avg_enemy_resources = sum(resource_gen(e.level) for e in alive_enemies) / max(len(alive_enemies), 1)
 
+    # CRITICAL: Check for hoarders and calculate max potential threat
+    max_threat = 0
+    num_hoarders = 0
+    for enemy in alive_enemies:
+        enemy_analysis = _estimate_enemy_resources(enemy, previous_attacks, turn)
+        if enemy_analysis["is_hoarding"]:
+            num_hoarders += 1
+            max_threat += enemy_analysis["threat_level"]
+        else:
+            max_threat += enemy_analysis["income"]
+
+    # If there are hoarders, increase our defensive stance
+    hoarder_multiplier = 1.0 + (num_hoarders * 0.2)  # +20% per hoarder
+
     # HP-based defense multiplier: lower HP = more defensive
     hp_ratio = me.hp / 100.0
 
-    # AGGRESSIVE MODE (Level 3+, not attacked, 3+ players): Minimal defense, focus on offense
-    if aggressive_mode:
-        # Only spend 20% on armor - we're capitalizing on being safe
-        armor_amount = int(budget * 0.2)
+    # DUEL MODE (2 players): Maximum defense - all-in survival
+    if duel_mode:
+        # In duel, spend 50-70% on armor depending on HP
+        # Need to balance defense with attack
+        if me.hp < 40:
+            armor_ratio = 0.7  # Critical HP - very defensive
+        elif me.hp < 60:
+            armor_ratio = 0.6  # Low HP - defensive
+        else:
+            armor_ratio = 0.5  # Normal HP - balanced
 
-    # ECONOMY MODE (Level < 3): Guarantee HP + Armor >= 120
+        # If being attacked, cover 100% of incoming
+        if incoming_damage > 0:
+            armor_amount = max(int(incoming_damage), int(budget * armor_ratio))
+        else:
+            # Prepare for enemy's max possible attack
+            armor_amount = int(budget * armor_ratio)
+
+        armor_amount = min(armor_amount, int(budget * 0.8))  # Cap at 80% to leave room for attack
+
+    # LEVEL 3+ DEFENSIVE MODE: Defense priority - 60%+ armor, save rest for one-shot
+    elif level3_defensive_mode:
+        # Always spend 60%+ on armor (can be more if needed for 150 HP or threats)
+        base_armor_ratio = 0.6
+
+        # Increase if hoarders present
+        if num_hoarders > 0:
+            base_armor_ratio = min(0.8, 0.6 + (num_hoarders * 0.1))  # Up to 80%
+
+        # Ensure we reach 150 HP minimum
+        LEVEL3_TARGET_HP = 150
+        current_total_hp = me.hp + me.armor
+        needed_for_target = max(0, LEVEL3_TARGET_HP - current_total_hp)
+
+        # If incoming damage, cover it + reach 150
+        if incoming_damage > 0:
+            coverage = int(incoming_damage * hoarder_multiplier)
+            armor_amount = max(needed_for_target, coverage, int(budget * base_armor_ratio))
+        else:
+            # No incoming - just maintain 150 HP + prepare for potential attacks
+            estimated_threat = int(max_threat * 0.3) if num_hoarders > 0 else int(avg_enemy_resources * 0.5)
+            armor_amount = max(needed_for_target, estimated_threat, int(budget * base_armor_ratio))
+
+        # Cap at 80% to leave 20% minimum for potential attacks
+        armor_amount = min(armor_amount, int(budget * 0.8))
+
+    # ECONOMY MODE (Level < 3): Guarantee HP + Armor >= 130 (increased from 120)
     elif economy_mode:
-        # Target: maintain total effective HP of 120
+        # Target: maintain total effective HP of 130 minimum
         # If heavily attacked, increase target
-        BASE_TARGET_HP = 120
+        BASE_TARGET_HP = 130  # Increased from 120 for better survival
 
-        # Increase target if being coordinated attacked
-        if attack_analysis["is_high_threat"]:
-            TARGET_TOTAL_HP = BASE_TARGET_HP + 30  # 150 total HP under heavy attack
-        elif attack_analysis["is_medium_threat"]:
-            TARGET_TOTAL_HP = BASE_TARGET_HP + 15  # 135 total HP under medium attack
+        # Increase target if being coordinated attacked OR hoarders detected
+        if attack_analysis["is_high_threat"] or num_hoarders >= 2:
+            TARGET_TOTAL_HP = BASE_TARGET_HP + 40  # 170 total HP
+        elif attack_analysis["is_medium_threat"] or num_hoarders >= 1:
+            TARGET_TOTAL_HP = BASE_TARGET_HP + 20  # 150 total HP
         else:
             TARGET_TOTAL_HP = BASE_TARGET_HP
 
         current_total_hp = me.hp + me.armor
         needed_armor = max(0, TARGET_TOTAL_HP - current_total_hp)
 
+        # CRITICAL: If hoarders detected, prepare for burst
+        if num_hoarders > 0 and incoming_damage == 0:
+            # No current attack, but hoarders might strike next turn
+            # Defend against 50% of max_threat
+            preemptive_armor = int(max_threat * 0.5)
+            needed_armor = max(needed_armor, preemptive_armor)
+
         if incoming_damage > 0:
             # Take the maximum of: needed for target HP or 110% incoming damage (cover + buffer)
-            armor_amount = max(needed_armor, int(incoming_damage * 1.1))
+            armor_amount = max(needed_armor, int(incoming_damage * 1.1 * hoarder_multiplier))
         else:
-            # Just get to target total HP
+            # Just get to target total HP (or preemptive hoarder defense)
             armor_amount = needed_armor
 
-        # Cap at 70-85% of budget depending on threat (leave room for upgrades)
-        cap_ratio = 0.7 + (attack_analysis["defense_boost"] * 0.6)  # 0.7 to 0.85
+        # Cap at 70-90% of budget depending on threat (leave room for upgrades)
+        cap_ratio = 0.7 + (attack_analysis["defense_boost"] * 0.6)
+        if num_hoarders >= 2:
+            cap_ratio = min(0.9, cap_ratio + 0.1)  # Up to 90% if multiple hoarders
         armor_amount = min(armor_amount, int(budget * cap_ratio))
 
-    # LEVEL 3+ MODE: More defensive focus with adaptive boost
-    elif incoming_damage > 0:
+    # LEVEL 3+ MODE: Maintain HP + Armor >= 150, then defend/attack
+    else:
+        # After Level 3, always maintain minimum 150 total HP
+        LEVEL3_TARGET_HP = 150
+        current_total_hp = me.hp + me.armor
+        needed_for_target = max(0, LEVEL3_TARGET_HP - current_total_hp)
+
+    # LEVEL 3+ WITH INCOMING DAMAGE: More defensive focus with adaptive boost
+    if not economy_mode and incoming_damage > 0:
         # Cover 100-120% of expected incoming (more if heavily attacked)
         coverage_ratio = 1.0 + (attack_analysis["defense_boost"] * 0.8)  # 1.0 to 1.2
+        # Increase coverage if hoarders present
+        coverage_ratio *= hoarder_multiplier
 
         # Base cap: 0.6 to 0.8 based on HP
         # Add defense boost for intensive attacks
         base_cap = 0.6 + (1.0 - hp_ratio) * 0.2  # 0.6 to 0.8
-        cap_multiplier = min(0.9, base_cap + attack_analysis["defense_boost"])  # up to 0.9
+        cap_multiplier = min(0.95, base_cap + attack_analysis["defense_boost"])  # up to 0.95
 
-        armor_amount = min(int(incoming_damage * coverage_ratio), int(budget * cap_multiplier))
-    elif me.hp < 40:
+        calculated_armor = int(incoming_damage * coverage_ratio)
+        # Ensure we reach 150 total HP minimum
+        armor_amount = max(needed_for_target, min(calculated_armor, int(budget * cap_multiplier)))
+    elif not economy_mode and me.hp < 40:
         # Critical HP — go very defensive (70-80% of budget based on threat)
-        cap_ratio = 0.7 + attack_analysis["defense_boost"]  # 0.7 to 0.95
-        armor_amount = min(int(avg_enemy_resources * 1.0), int(budget * cap_ratio))
-    elif me.hp < 60:
+        cap_ratio = min(0.95, (0.7 + attack_analysis["defense_boost"]) * hoarder_multiplier)
+        # Defend against max_threat instead of just avg_enemy_resources
+        calculated_armor = int(max_threat * 0.5)
+        armor_amount = max(needed_for_target, min(calculated_armor, int(budget * cap_ratio)))
+    elif not economy_mode and me.hp < 60:
         # Low HP — invest significantly more (60-75% of budget based on threat)
-        cap_ratio = 0.6 + attack_analysis["defense_boost"]  # 0.6 to 0.85
-        armor_amount = min(int(avg_enemy_resources * 0.8), int(budget * cap_ratio))
-    else:
+        cap_ratio = min(0.85, (0.6 + attack_analysis["defense_boost"]) * hoarder_multiplier)
+        calculated_armor = int(max_threat * 0.4)
+        armor_amount = max(needed_for_target, min(calculated_armor, int(budget * cap_ratio)))
+    elif not economy_mode:
         # Normal HP — higher defense (50-65% of budget based on threat)
-        cap_ratio = 0.5 + attack_analysis["defense_boost"]  # 0.5 to 0.75
-        armor_amount = min(int(avg_enemy_resources * 0.5), int(budget * cap_ratio))
+        # If hoarders present, defend against potential burst
+        cap_ratio = min(0.75, (0.5 + attack_analysis["defense_boost"]) * hoarder_multiplier)
+        if num_hoarders > 0:
+            # Prepare for burst attack
+            calculated_armor = int(max_threat * 0.3)
+        else:
+            calculated_armor = int(avg_enemy_resources * 0.5)
+        # Always ensure 150 total HP minimum at Level 3+
+        armor_amount = max(needed_for_target, min(calculated_armor, int(budget * cap_ratio)))
 
     armor_amount = max(0, armor_amount)
 
@@ -429,38 +620,115 @@ def _decide_attacks(
     agreed_targets: set[int],
     me: PlayerTower,
     economy_mode: bool = False,
-    aggressive_mode: bool = False,
+    level3_defensive_mode: bool = False,
+    duel_mode: bool = False,
+    turn: int = 0,
+    previous_attacks: list[CombatActionEntry] = None,
 ) -> int:
     if budget <= 0 or not enemies:
         return budget
+
+    if previous_attacks is None:
+        previous_attacks = []
 
     # ECONOMY MODE (Level < 3): NO ATTACKS - focus purely on upgrades
     # Zero attacks to maximize upgrade speed and reach Level 3 ASAP
     if economy_mode:
         return budget
 
-    # AGGRESSIVE MODE: Use 60% of original budget for attacks, save 20%
-    if aggressive_mode:
-        # Calculate 60% of total budget for attacks (20% already spent on armor)
-        original_budget = budget / 0.8  # Reverse calculate original budget
-        attack_budget = int(original_budget * 0.6)
+    # Analyze enemy resource patterns
+    enemy_resources = {}
+    alive_enemies = []
+    for e in enemies:
+        if e.hp > 0:
+            enemy_resources[e.playerId] = _estimate_enemy_resources(e, previous_attacks, turn)
+            alive_enemies.append(e)
 
-        # Use attack_budget for attacks, save the rest (20% automatically saved)
-        budget_to_use = min(attack_budget, budget)
-        remaining_budget = budget - budget_to_use
+    # LEVEL 3+ STRATEGY: Accumulate resources for one-shot kill on weakest
+    save_for_kill = False
+    kill_target = None
 
-        # Perform attacks with increased aggression
-        hp_ratio = me.hp / 100.0
-        aggression_factor = 0.7 + hp_ratio * 0.3  # 0.7 to 1.0 (more aggressive)
-    else:
-        # DEFENSIVE MODE: Normal behavior
+    if me.level >= 3 and len(alive_enemies) > 0:
+        # Find the weakest enemy (lowest effective HP)
+        weakest = min(alive_enemies, key=lambda e: effective_hp(e))
+        weakest_hp = effective_hp(weakest)
+
+        # Calculate available attack budget (after mandatory armor for 150 HP)
+        LEVEL3_TARGET_HP = 150
+        current_total_hp = me.hp + me.armor
+        needed_armor_for_survival = max(0, LEVEL3_TARGET_HP - current_total_hp)
+
+        # Budget available for attacks (after ensuring survival)
+        available_for_attack = budget - needed_armor_for_survival
+
+        # Check if we can kill them this turn (with available attack budget)
+        if weakest_hp <= available_for_attack and available_for_attack > 0:
+            # We have enough - go for the kill!
+            kill_target = weakest
+        elif weakest_hp <= (available_for_attack + resource_gen(me.level)):
+            # Can kill next turn if we save - accumulate resources
+            save_for_kill = True
+            kill_target = weakest
+
+    # DUEL MODE: All-in attack with remaining budget
+    if duel_mode:
+        # In 1v1, use 100% of remaining budget - no saving
         budget_to_use = budget
         remaining_budget = 0
 
-        # HP-based aggression: lower HP = less aggressive
-        # Reduced aggression for more defensive playstyle after Level 3
+        # Maximum aggression - go for the kill
         hp_ratio = me.hp / 100.0
-        aggression_factor = 0.3 + hp_ratio * 0.5  # 0.3 to 0.8 (was 0.4 to 1.0)
+        aggression_factor = 1.0  # Max aggression in duel
+
+    # LEVEL 3+ DEFENSIVE MODE: Save for one-shot, only attack if can kill
+    elif level3_defensive_mode:
+        # After armor (60%+), we have 40% budget left
+        # Save it all UNLESS we can one-shot kill someone
+
+        hp_ratio = me.hp / 100.0
+
+        # Check if we can one-shot anyone with current budget
+        can_oneshot = kill_target is not None and effective_hp(kill_target) <= budget
+
+        if can_oneshot:
+            # We can kill someone - use ALL remaining budget for it
+            budget_to_use = budget
+            remaining_budget = 0
+            aggression_factor = 1.0  # Max aggression for kill
+        elif save_for_kill:
+            # Saving for next turn kill - minimal attacks (only retaliation if attacked)
+            if len(attackers) > 0:
+                # We were attacked - light retaliation with 20% budget
+                budget_to_use = int(budget * 0.2)
+                remaining_budget = budget - budget_to_use
+                aggression_factor = 0.5  # Moderate
+            else:
+                # Not attacked - save everything
+                budget_to_use = 0
+                remaining_budget = budget
+                aggression_factor = 0.0
+        else:
+            # Normal mode - can't one-shot anyone soon, save most resources
+            # Only light attacks for pressure (20% of remaining)
+            budget_to_use = int(budget * 0.2)
+            remaining_budget = budget - budget_to_use
+            aggression_factor = 0.4  # Low aggression
+
+    else:
+        # Economy mode or other - shouldn't happen but handle it
+        budget_to_use = budget
+        remaining_budget = 0
+
+        hp_ratio = me.hp / 100.0
+        aggression_factor = 0.3 + hp_ratio * 0.5
+
+    # SAVE FOR KILL MODE: If accumulating for one-shot, minimal attacks
+    if save_for_kill and kill_target:
+        # Only attack if we can kill the target OR in retaliation
+        # Otherwise save resources
+        if kill_target.playerId not in attackers:
+            # Not being attacked - save everything for next turn kill
+            return remaining_budget
 
     # Score each enemy for targeting
     target_scores: list[tuple[EnemyTower, float]] = []
@@ -471,6 +739,30 @@ def _decide_attacks(
             continue
 
         score = 0.0
+
+        # KILL TARGET PRIORITY: Massive bonus if we can kill them
+        if kill_target and e.playerId == kill_target.playerId:
+            ehp = effective_hp(e)
+            if ehp <= budget_to_use:
+                score += 500  # HUGE priority - guaranteed kill
+
+        # Get enemy resource analysis
+        e_analysis = enemy_resources.get(e.playerId, {})
+        is_turtle = e_analysis.get("is_turtle", False)
+        is_hoarding = e_analysis.get("is_hoarding", False)
+
+        # TURTLE DETECTION: Don't attack enemies with pure defense strategy
+        if is_turtle and e.hp > 60:
+            # They spend everything on armor - attacking them is wasteful
+            score -= 200
+            # Exception: if they're killable, still worth it
+            ehp = effective_hp(e)
+            if ehp <= budget_to_use:
+                score += 250  # Override turtle penalty if killable
+
+        # HOARDER DETECTION: Prioritize attacking hoarders to force them to spend
+        if is_hoarding:
+            score += 40  # Higher priority - they're dangerous
 
         # Retaliation — reduced from 50 to 30, scaled by HP for defensive playstyle
         if e.playerId in attackers:
@@ -487,7 +779,7 @@ def _decide_attacks(
 
         # Prefer killable targets (can we finish them this turn?)
         ehp = effective_hp(e)
-        if ehp <= budget:
+        if ehp <= budget_to_use:
             score += 80  # huge bonus for securing a kill
 
         # Prefer weaker targets to eliminate faster
@@ -504,11 +796,15 @@ def _decide_attacks(
     # But scale aggression with HP (reduced for defensive playstyle)
     used_targets: set[int] = set()
 
-    # Primary target budget: scale from 40% (low HP) to 60% (high HP) - was 50% to 75%
-    # In aggressive mode, be more willing to go all-in
-    if aggressive_mode:
-        primary_budget_ratio = 0.6 + hp_ratio * 0.3  # 0.6 to 0.9
+    # Primary target budget: scale based on mode and HP
+    if duel_mode:
+        # Duel: go all-in on single target
+        primary_budget_ratio = 0.9 + hp_ratio * 0.1  # 0.9 to 1.0
+    elif level3_defensive_mode and can_oneshot:
+        # Level 3+ defensive but can kill: focus fire
+        primary_budget_ratio = 1.0  # 100% on killable target
     else:
+        # Other modes: moderate focus
         primary_budget_ratio = 0.4 + hp_ratio * 0.2  # 0.4 to 0.6
 
     for target, score in target_scores:
