@@ -96,10 +96,11 @@ def decide_negotiation(req: NegotiateRequest) -> list[dict]:
         if ca.action.targetId == me.playerId:
             attackers[ca.playerId] = ca.action.troopCount
 
-    # Score threats
+    # Score threats (filter out dead enemies)
     scored = [
         (e, _threat(e, e.playerId in attackers, attackers.get(e.playerId, 0)))
         for e in enemies
+        if e.hp > 0
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
 
@@ -145,14 +146,26 @@ def decide_combat(req: CombatRequest) -> list[dict]:
     allies = _get_allies(req.diplomacy, me.playerId)
     agreed_targets = _get_agreed_targets(req.diplomacy, me.playerId)
 
+    # --- Check if we're in "saving mode" for early upgrades ---
+    saving_for_upgrade = False
+    next_upgrade_cost = 0
+
+    if me.level < 3 and me.level < MAX_LEVEL and me.hp > 50:
+        # Only save if HP is healthy enough (>50)
+        # If HP is critical, survival takes priority over economy
+        next_upgrade_cost = upgrade_cost(me.level)
+        # If we have 70%+ of upgrade cost, enter saving mode
+        if budget >= next_upgrade_cost * 0.7:
+            saving_for_upgrade = True
+
     # --- 1. UPGRADE decision ---
     budget = _maybe_upgrade(actions, me, turn, budget)
 
     # --- 2. ARMOR decision ---
-    budget = _maybe_armor(actions, me, turn, budget, attackers, enemies)
+    budget = _maybe_armor(actions, me, turn, budget, attackers, enemies, saving_for_upgrade)
 
     # --- 3. ATTACK decision ---
-    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me)
+    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me, saving_for_upgrade)
 
     return actions
 
@@ -194,19 +207,30 @@ def _maybe_armor(
     budget: int,
     attackers: dict[int, int],
     enemies: list[EnemyTower],
+    saving_for_upgrade: bool = False,
 ) -> int:
     if budget <= 0:
         return budget
 
     incoming_damage = sum(attackers.values())
 
-    # Estimate potential incoming even if we weren't attacked last turn
-    avg_enemy_resources = sum(resource_gen(e.level) for e in enemies) / max(len(enemies), 1)
+    # Estimate potential incoming even if we weren't attacked last turn (ignore dead enemies)
+    alive_enemies = [e for e in enemies if e.hp > 0]
+    avg_enemy_resources = sum(resource_gen(e.level) for e in alive_enemies) / max(len(alive_enemies), 1)
 
     # HP-based defense multiplier: lower HP = more defensive
     hp_ratio = me.hp / 100.0
 
-    if incoming_damage > 0:
+    # SAVING MODE: Minimize spending when accumulating for early upgrades (level < 3)
+    if saving_for_upgrade:
+        # Only buy minimal armor - just enough to not die
+        if incoming_damage > 0:
+            # Cover 50% of incoming to survive
+            armor_amount = min(int(incoming_damage * 0.5), budget // 4)
+        else:
+            # Minimal armor (5-10 coins max)
+            armor_amount = min(8, budget // 5)
+    elif incoming_damage > 0:
         # Cover 100% of expected incoming (was 60%)
         # Cap increases with lower HP: from budget//2 to budget*0.7
         cap_multiplier = 0.5 + (1.0 - hp_ratio) * 0.2  # 0.5 to 0.7
@@ -241,9 +265,20 @@ def _decide_attacks(
     allies: set[int],
     agreed_targets: set[int],
     me: PlayerTower,
+    saving_for_upgrade: bool = False,
 ) -> int:
     if budget <= 0 or not enemies:
         return budget
+
+    # SAVING MODE: Don't attack at all when accumulating for early upgrades (level < 3)
+    # Exception: if being heavily attacked, minimal retaliation to deter
+    if saving_for_upgrade:
+        incoming_damage = sum(attackers.values())
+        # Only attack if being heavily attacked (incoming > 20)
+        if incoming_damage < 20:
+            return budget
+        # Otherwise allow minimal retaliation with max 20% of budget
+        budget = min(budget, int(budget * 0.2))
 
     # HP-based aggression: lower HP = less aggressive
     hp_ratio = me.hp / 100.0
@@ -253,6 +288,10 @@ def _decide_attacks(
     target_scores: list[tuple[EnemyTower, float]] = []
 
     for e in enemies:
+        # Skip dead enemies - don't waste resources on eliminated players
+        if e.hp <= 0:
+            continue
+
         score = 0.0
 
         # Retaliation — reduced from 100 to 50, scaled by HP
