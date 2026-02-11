@@ -352,42 +352,22 @@ def _maybe_upgrade(
     if num_alive == 2:
         return budget  # Skip upgrade in 1v1
 
-    # PRIORITY: Always upgrade to Level 3 (economy mode target)
-    # Stealth only applies to Level 3+ upgrades
-    if me.level < 3:
-        # Economy mode - always try to reach Level 3
-        pass  # Continue to ROI check below
-    # STEALTH STRATEGY: Be second in level while 4+ players alive (Level 3+ only)
-    # If we're already #1 (highest level), DON'T upgrade - stay under the radar
-    # Exception: if multiple players at highest level, we can upgrade
-    elif num_alive >= 4:
-        # Count how many players are at the highest level
-        alive_enemies = [e for e in enemies if e.hp > 0]
-        players_at_highest = sum(1 for e in alive_enemies if e.level == highest_level)
-        if me.level == highest_level:
-            players_at_highest += 1  # Include us
-
-        # If we're the ONLY one at highest level, don't upgrade (be #2)
-        if our_rank == 1 and players_at_highest == 1:
-            # Save money instead of upgrading
-            return budget
-
-    # PRIORITY: Always upgrade to Level 3 if we can afford it
-    # Level 3 is critical for strategy - skip ROI check
-    if me.level < 3:
-        # Economy mode - upgrade to L3 ASAP
+    # PRIORITY: Always upgrade to Level 4 - critical for economy
+    # Skip ROI check for essential upgrades (Level 1->2, 2->3, 3->4)
+    if me.level < 4:
+        # Critical economy upgrades - do immediately
         actions.append({"type": "upgrade"})
         budget -= cost
         return budget
 
-    # For Level 3+ upgrades, check ROI
+    # For Level 4->5 upgrade, check ROI (final upgrade, expensive)
     turns_left = max(1, GAME_HORIZON - turn)
     extra_per_turn = resource_gen(me.level + 1) - resource_gen(me.level)
     payback_turns = cost / extra_per_turn if extra_per_turn else 999
 
-    # Upgrade if it pays for itself within 60% of remaining game
-    # Extended to turn 23 to maximize ROI before fatigue at turn 25
-    if payback_turns < turns_left * 0.6 and turn <= 23:
+    # Upgrade if it pays for itself within 80% of remaining game
+    # Extended to turn 26 to maximize ROI before fatigue at turn 25
+    if payback_turns < turns_left * 0.8 and turn <= 26:
         actions.append({"type": "upgrade"})
         budget -= cost
 
