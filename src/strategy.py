@@ -1,14 +1,17 @@
 """
-Kingdom Wars AI Strategy - Version 3.2 (Economic Focus + Adaptive Defense + Opportunistic Offense)
+Kingdom Wars AI Strategy - Version 3.3 (Stealth Economy + Adaptive Tactics)
 
 Core philosophy:
-1. ECONOMY FIRST — No attacks until Level 3, focus purely on upgrades
-2. SURVIVAL TARGET — Maintain HP + Armor >= 120 during early game (adaptive: up to 150 under heavy attack)
-3. OPPORTUNISTIC AGGRESSION — After Level 3, if not attacked: 60% offense, 20% defense, 20% save
-4. ADAPTIVE DEFENSE — Analyze attack intensity and boost armor spending accordingly when threatened
-5. HP-adaptive strategy — scale aggression/defense based on current HP
-6. Focus fire — eliminating a player is worth more than spreading damage
-7. Diplomacy — gang up on the strongest threat
+1. STEALTH ECONOMY — Be #2 in level while 4+ players alive (don't be the biggest threat)
+2. ECONOMY FIRST — No attacks until Level 3, focus purely on upgrades
+3. SURVIVAL TARGET — Maintain HP + Armor >= 120 during early game (adaptive: up to 150 under heavy attack)
+4. OPPORTUNISTIC AGGRESSION — After Level 3, if not attacked: 60% offense, 20% defense, 20% save
+5. ADAPTIVE DEFENSE — Analyze attack intensity and boost armor spending accordingly when threatened
+6. HP-adaptive strategy — scale aggression/defense based on current HP
+7. Focus fire — eliminating a player is worth more than spreading damage
+8. SMART DIPLOMACY:
+   - Level < 3: Offer friendship to ALL players (protect economy phase)
+   - Level >= 3: Coordinate attacks on WEAKEST player (quick elimination)
 
 Combat Modes:
 - ECONOMY MODE (Level < 3): 0% attack, 70-85% armor, rest upgrades
@@ -32,6 +35,12 @@ New in v3.2:
 - Resource saving: 20% budget reserved for future turns in aggressive mode
 - Increased aggression factor: 0.7-1.0 in aggressive mode vs 0.3-0.8 in defensive
 - Smarter budget allocation: adapt spending based on threat level
+
+New in v3.3:
+- Stealth upgrade strategy: stay at #2 level position while 4+ players alive
+- Avoid being the biggest threat: don't upgrade if already highest level (solo)
+- Resource accumulation: save coins when not upgrading for strategic opportunities
+- Level position tracking: monitor our rank among all alive players
 """
 
 from __future__ import annotations
@@ -77,7 +86,10 @@ def effective_hp(t: EnemyTower | PlayerTower) -> int:
 # ---------------------------------------------------------------------------
 
 def _threat(enemy: EnemyTower, attacked_us: bool, troop_count: int = 0) -> float:
-    """Higher = more dangerous. Used for target & alliance selection."""
+    """
+    Higher = more dangerous. Used for target & alliance selection.
+    Reserved for future advanced targeting logic.
+    """
     score = 0.0
     # Economy is the biggest long-term threat
     score += resource_gen(enemy.level) * 2.0
@@ -90,49 +102,81 @@ def _threat(enemy: EnemyTower, attacked_us: bool, troop_count: int = 0) -> float
     return score
 
 
+def _get_level_position(me: PlayerTower, enemies: list[EnemyTower]) -> tuple[int, int, int]:
+    """
+    Determine our position in level ranking.
+    Returns: (our_rank, highest_level, num_alive)
+    - our_rank: 1 = highest, 2 = second highest, etc.
+    - highest_level: the maximum level among all alive players
+    - num_alive: number of alive players (including us)
+    """
+    alive_enemies = [e for e in enemies if e.hp > 0]
+
+    # Get all levels including ours
+    all_levels = [me.level] + [e.level for e in alive_enemies]
+    all_levels_sorted = sorted(all_levels, reverse=True)
+
+    # Find our rank (1-indexed)
+    our_rank = all_levels_sorted.index(me.level) + 1
+
+    # Highest level among all
+    highest_level = all_levels_sorted[0]
+
+    # Total alive players
+    num_alive = len(alive_enemies) + 1  # +1 for us
+
+    return (our_rank, highest_level, num_alive)
+
+
 # ---------------------------------------------------------------------------
 # Negotiation strategy
 # ---------------------------------------------------------------------------
 
 def decide_negotiation(req: NegotiateRequest) -> list[dict]:
-    """Return list of diplomacy proposals."""
+    """
+    Return list of diplomacy proposals.
+
+    Strategy:
+    - Level < 3 (Economy mode): Offer friendship to ALL players (no attack target)
+    - Level >= 3: Coordinate attacks on the WEAKEST player (easiest to eliminate)
+    """
     me = req.playerTower
     enemies = req.enemyTowers
 
     if not enemies:
         return []
 
-    # Build attacker set from last turn's combat actions
-    attackers: dict[int, int] = {}
-    for ca in req.combatActions:
-        if ca.action.targetId == me.playerId:
-            attackers[ca.playerId] = ca.action.troopCount
+    # Filter out dead enemies
+    alive_enemies = [e for e in enemies if e.hp > 0]
+    if not alive_enemies:
+        return []
 
-    # Score threats (filter out dead enemies)
-    scored = [
-        (e, _threat(e, e.playerId in attackers, attackers.get(e.playerId, 0)))
-        for e in enemies
-        if e.hp > 0
-    ]
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    biggest_threat = scored[0][0]
-
-    # Propose alliance with everyone EXCEPT the biggest threat
-    # Ask them all to attack the biggest threat
     proposals = []
-    seen_allies: set[int] = set()
 
-    for enemy, _ in scored:
-        if enemy.playerId == biggest_threat.playerId:
-            continue
-        if enemy.playerId in seen_allies:
-            continue
-        seen_allies.add(enemy.playerId)
-        proposals.append({
-            "allyId": enemy.playerId,
-            "attackTargetId": biggest_threat.playerId,
-        })
+    # ECONOMY MODE (Level < 3): Offer friendship to everyone
+    if me.level < 3:
+        # Send friendship offers to all alive enemies
+        for enemy in alive_enemies:
+            proposals.append({
+                "allyId": enemy.playerId,
+                "attackTargetId": None,  # No attack target = peace offer
+            })
+
+    # AGGRESSIVE/DEFENSIVE MODE (Level >= 3): Gang up on weakest
+    else:
+        # Find the weakest enemy (lowest effective HP)
+        weakest = min(alive_enemies, key=lambda e: effective_hp(e))
+
+        # Propose alliance with everyone EXCEPT the weakest
+        # Ask them all to attack the weakest target
+        for enemy in alive_enemies:
+            if enemy.playerId == weakest.playerId:
+                continue  # Don't ally with our target
+
+            proposals.append({
+                "allyId": enemy.playerId,
+                "attackTargetId": weakest.playerId,
+            })
 
     return proposals
 
@@ -176,7 +220,7 @@ def decide_combat(req: CombatRequest) -> list[dict]:
     )
 
     # --- 1. UPGRADE decision ---
-    budget = _maybe_upgrade(actions, me, turn, budget)
+    budget = _maybe_upgrade(actions, me, turn, budget, enemies)
 
     # --- 2. ARMOR decision ---
     budget = _maybe_armor(actions, me, budget, attackers, enemies, economy_mode, aggressive_mode)
@@ -196,6 +240,7 @@ def _maybe_upgrade(
     me: PlayerTower,
     turn: int,
     budget: int,
+    enemies: list[EnemyTower],
 ) -> int:
     if me.level >= MAX_LEVEL:
         return budget
@@ -203,6 +248,24 @@ def _maybe_upgrade(
     cost = upgrade_cost(me.level)
     if budget < cost:
         return budget
+
+    # Get our level position
+    our_rank, highest_level, num_alive = _get_level_position(me, enemies)
+
+    # STEALTH STRATEGY: Be second in level while 4+ players alive
+    # If we're already #1 (highest level), DON'T upgrade - stay under the radar
+    # Exception: if multiple players at highest level, we can upgrade
+    if num_alive >= 4:
+        # Count how many players are at the highest level
+        alive_enemies = [e for e in enemies if e.hp > 0]
+        players_at_highest = sum(1 for e in alive_enemies if e.level == highest_level)
+        if me.level == highest_level:
+            players_at_highest += 1  # Include us
+
+        # If we're the ONLY one at highest level, don't upgrade (be #2)
+        if our_rank == 1 and players_at_highest == 1:
+            # Save money instead of upgrading
+            return budget
 
     turns_left = max(1, GAME_HORIZON - turn)
     extra_per_turn = resource_gen(me.level + 1) - resource_gen(me.level)
@@ -381,9 +444,8 @@ def _decide_attacks(
         # Calculate 60% of total budget for attacks (20% already spent on armor)
         original_budget = budget / 0.8  # Reverse calculate original budget
         attack_budget = int(original_budget * 0.6)
-        save_budget = int(original_budget * 0.2)
 
-        # Use attack_budget for attacks, save the rest
+        # Use attack_budget for attacks, save the rest (20% automatically saved)
         budget_to_use = min(attack_budget, budget)
         remaining_budget = budget - budget_to_use
 
