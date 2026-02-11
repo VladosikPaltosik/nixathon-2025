@@ -1,12 +1,20 @@
 """
-Kingdom Wars AI Strategy
+Kingdom Wars AI Strategy - Version 2 (Defensive Rebalance)
 
 Core philosophy:
-1. Rush upgrades early — resource advantage compounds hard.
-2. Focus fire — eliminating a player is worth more than spreading damage.
-3. Diplomacy — gang up on the strongest threat.
-4. Armor is cheap insurance when being targeted.
-5. Late-game: pure aggression before fatigue kills everyone.
+1. Rush upgrades early (extended to turn 23) — resource advantage compounds hard.
+2. Defense first — survival enables late-game dominance.
+3. HP-adaptive strategy — scale aggression/defense based on current HP.
+4. Smart retaliation — revenge when strong, defend when weak.
+5. Focus fire — eliminating a player is worth more than spreading damage.
+6. Diplomacy — gang up on the strongest threat.
+
+Key improvements over v1:
+- 100% armor coverage (was 60%)
+- HP-aware defense scaling (higher armor when HP < 60)
+- Reduced suicidal retaliation (bonus 50 vs 100)
+- Better early armor (12 vs 5)
+- Extended upgrade window (turn 23 vs 20)
 """
 
 from __future__ import annotations
@@ -144,7 +152,7 @@ def decide_combat(req: CombatRequest) -> list[dict]:
     budget = _maybe_armor(actions, me, turn, budget, attackers, enemies)
 
     # --- 3. ATTACK decision ---
-    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets)
+    budget = _decide_attacks(actions, enemies, budget, attackers, allies, agreed_targets, me)
 
     return actions
 
@@ -171,8 +179,8 @@ def _maybe_upgrade(
     payback_turns = cost / extra_per_turn if extra_per_turn else 999
 
     # Upgrade if it pays for itself within 60% of remaining game
-    # and we're not in super-late game
-    if payback_turns < turns_left * 0.6 and turn <= 20:
+    # Extended to turn 23 to maximize ROI before fatigue at turn 25
+    if payback_turns < turns_left * 0.6 and turn <= 23:
         actions.append({"type": "upgrade"})
         budget -= cost
 
@@ -193,21 +201,28 @@ def _maybe_armor(
     incoming_damage = sum(attackers.values())
 
     # Estimate potential incoming even if we weren't attacked last turn
-    # (someone might start targeting us)
     avg_enemy_resources = sum(resource_gen(e.level) for e in enemies) / max(len(enemies), 1)
 
+    # HP-based defense multiplier: lower HP = more defensive
+    hp_ratio = me.hp / 100.0
+
     if incoming_damage > 0:
-        # Cover ~60% of expected incoming
-        armor_amount = min(int(incoming_damage * 0.6), budget // 3)
+        # Cover 100% of expected incoming (was 60%)
+        # Cap increases with lower HP: from budget//2 to budget*0.7
+        cap_multiplier = 0.5 + (1.0 - hp_ratio) * 0.2  # 0.5 to 0.7
+        armor_amount = min(int(incoming_damage * 1.0), int(budget * cap_multiplier))
     elif turn <= 3:
-        # Minimal early armor — save for upgrade
-        armor_amount = min(5, budget // 4)
-    elif me.hp < 50:
-        # Low HP — invest more in armor
-        armor_amount = min(int(avg_enemy_resources * 0.5), budget // 3)
+        # Better early armor — increased from 5 to 12
+        armor_amount = min(12, budget // 3)
+    elif me.hp < 40:
+        # Critical HP — go very defensive (60% of budget)
+        armor_amount = min(int(avg_enemy_resources * 0.8), int(budget * 0.6))
+    elif me.hp < 60:
+        # Low HP — invest significantly more (50% of budget)
+        armor_amount = min(int(avg_enemy_resources * 0.7), int(budget * 0.5))
     else:
-        # Light defensive buffer
-        armor_amount = min(int(avg_enemy_resources * 0.25), budget // 5, 15)
+        # Normal HP — moderate defense (35% of budget, was 20%)
+        armor_amount = min(int(avg_enemy_resources * 0.4), int(budget * 0.35), 25)
 
     armor_amount = max(0, armor_amount)
 
@@ -225,9 +240,14 @@ def _decide_attacks(
     attackers: dict[int, int],
     allies: set[int],
     agreed_targets: set[int],
+    me: PlayerTower,
 ) -> int:
     if budget <= 0 or not enemies:
         return budget
+
+    # HP-based aggression: lower HP = less aggressive
+    hp_ratio = me.hp / 100.0
+    aggression_factor = 0.4 + hp_ratio * 0.6  # 0.4 to 1.0
 
     # Score each enemy for targeting
     target_scores: list[tuple[EnemyTower, float]] = []
@@ -235,9 +255,10 @@ def _decide_attacks(
     for e in enemies:
         score = 0.0
 
-        # Retaliation — strong incentive
+        # Retaliation — reduced from 100 to 50, scaled by HP
         if e.playerId in attackers:
-            score += 100 + attackers[e.playerId] * 1.5
+            retaliation_bonus = (50 + attackers[e.playerId] * 1.2) * aggression_factor
+            score += retaliation_bonus
 
         # Coordinated attack bonus
         if e.playerId in agreed_targets:
@@ -263,7 +284,11 @@ def _decide_attacks(
     target_scores.sort(key=lambda x: x[1], reverse=True)
 
     # Focus fire: dump most resources on primary target
+    # But scale aggression with HP
     used_targets: set[int] = set()
+
+    # Primary target budget: scale from 50% (low HP) to 75% (high HP)
+    primary_budget_ratio = 0.5 + hp_ratio * 0.25
 
     for target, score in target_scores:
         if budget <= 0:
@@ -277,8 +302,13 @@ def _decide_attacks(
         ehp = effective_hp(target)
 
         if len(used_targets) == 0:
-            # Primary target: go all-in, or at least enough to kill
-            spend = min(budget, max(ehp, int(budget * 0.75)))
+            # Primary target: scaled by HP
+            # If we can kill, spend enough to kill
+            # Otherwise spend primary_budget_ratio of budget
+            if ehp <= budget:
+                spend = min(budget, ehp)
+            else:
+                spend = min(budget, int(budget * primary_budget_ratio))
         else:
             # Secondary target: spend the rest
             spend = budget
